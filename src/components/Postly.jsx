@@ -189,27 +189,66 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
     setIsAIEditing(true);
     setAiEditError(null);
     try {
-      // Get base64 via canvas (avoids CORS on external image URLs)
+      const targetSize = 1024;
       const canvas = document.createElement('canvas');
+      canvas.width = targetSize;
+      canvas.height = targetSize;
+      const ctx = canvas.getContext('2d', { alpha: true });
+      
       const img = new Image();
       img.crossOrigin = 'anonymous';
       await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = image; });
-      canvas.width = img.width; canvas.height = img.height;
-      canvas.getContext('2d').drawImage(img, 0, 0);
+      
+      // 1. Calculate square placement (Contain)
+      const scale = Math.min(targetSize / img.width, targetSize / img.height);
+      const x = (targetSize / 2) - (img.width / 2) * scale;
+      const y = (targetSize / 2) - (img.height / 2) * scale;
+      
+      // 2. Draw image centered
+      ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
+      
+      // 3. Apply Smart Transparency for Background/Style edits
+      // This forces DALL-E to replace the background instead of ignoring the request.
+      const isBackgroundEdit = activeEditTab === 'background' || activeEditTab === 'style' || activeEditTab === 'lighting';
+      if (isBackgroundEdit) {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        // Create an "island" in the center for the product, erase the rest
+        // We leave a generous elliptical/rectangular area for the product
+        const prWidth = (img.width * scale) * 0.75;
+        const prHeight = (img.height * scale) * 0.75;
+        const prX = (targetSize - prWidth) / 2;
+        const prY = (targetSize - prHeight) / 2;
+        
+        ctx.rect(0, 0, targetSize, targetSize);
+        ctx.ellipse(targetSize/2, targetSize/2, prWidth/2, prHeight/2, 0, 0, Math.PI * 2);
+        ctx.fill('evenodd'); 
+        ctx.globalCompositeOperation = 'source-over';
+      }
+
       const imageBase64 = canvas.toDataURL('image/png');
+      console.log(`[AI Studio] Prepared 1024x1024 image mask, size: ${(imageBase64.length / 1024).toFixed(1)}KB`);
 
       const data = await apiCall('/api/openai/edit-image', {
         method: 'POST',
         body: JSON.stringify({ imageBase64, prompt: p })
       });
+      
+      if (!data.imageBase64 || data.imageBase64.length < 100) {
+        throw new Error('AI returned an empty image. Try again.');
+      }
+
       setImage(data.imageBase64);
       setIsPolishDone(true);
       showToast('AI edit applied successfully.');
     } catch (err) {
-      console.error(err);
+      console.error('[AI Studio Error]', err);
       setAiEditError(err.message || 'AI edit failed. Try a different prompt.');
     } finally {
       setIsAIEditing(false);
+    }
+  };
+IEditing(false);
     }
   };
 

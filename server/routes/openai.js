@@ -129,6 +129,12 @@ router.post('/edit-image', authMiddleware, async (req, res) => {
     });
 
     const b64 = response.data[0].b64_json;
+    if (!b64) {
+      console.warn('[AI Edit] OpenAI returned success but b64_json is missing.');
+      return res.status(500).json({ error: 'AI failed to generate image data.' });
+    }
+    
+    console.log(`[AI Edit] Successfully edited image. Result size: ${(b64.length / 1024).toFixed(1)}KB`);
     res.json({ imageBase64: `data:image/png;base64,${b64}` });
   } catch (err) {
     console.error('Image edit error:', err.message);
