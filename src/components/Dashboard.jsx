@@ -46,37 +46,62 @@ export default function Dashboard({ user, onLogout }) {
   const [showUserMenu, setShowUserMenu] = useState(false);
 
   const sharePost = async (platform, text, imageUrl) => {
-    // 1. Proactively grab the text
-    try { await navigator.clipboard.writeText(text); } catch(e){}
+    const isMobile = window.matchMedia("(any-pointer: coarse)").matches;
     
-    // 2. Fetch and download the image locally from Supabase URL
-    if (imageUrl) {
-      try {
-        const resp = await fetch(imageUrl);
-        const blob = await resp.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        a.download = `postly-campaign.png`;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-      } catch(e) {
-        console.warn('Auto download failed', e);
+    // 1. Download & Rich Clipboard Copy
+    try {
+      const resp = await fetch(imageUrl);
+      const blob = await resp.blob();
+      const imgFile = new File([blob], 'postly-campaign.png', { type: 'image/png' });
+      
+      // Auto-download fallback
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `postly-campaign.png`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+      const isClipboardItemSupported = typeof ClipboardItem !== 'undefined';
+      if (isClipboardItemSupported) {
+        const item = new ClipboardItem({
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'image/png': blob
+        });
+        await navigator.clipboard.write([item]);
+      } else {
+        await navigator.clipboard.writeText(text);
       }
+    } catch(e) {
+      console.warn('Rich copy or download failed', e);
+      try { await navigator.clipboard.writeText(text); } catch(e2){}
     }
 
-    // 3. Fire Web Intent for Desktop or Web Share for Native
+    // 2. Fire Web Intent for Desktop
     let intentUrl = '';
     if (platform === 'twitter') intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
-    else if (platform === 'facebook') intentUrl = `https://www.facebook.com/sharer/sharer.php`;
-    else if (platform === 'linkedin') intentUrl = `https://www.linkedin.com/feed/?shareActive=true`;
+    else if (platform === 'facebook') intentUrl = `https://www.facebook.com`;
+    else if (platform === 'linkedin') intentUrl = `https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(text)}`;
     
-    if (intentUrl && !window.matchMedia("(any-pointer: coarse)").matches) {
+    if (intentUrl && !isMobile) {
        window.open(intentUrl, '_blank');
-    } else if (navigator.share) {
-       navigator.share({ text, url: imageUrl }).catch(()=>{});
+       return;
+    }
+
+    // 3. Mobile Share Sheet
+    if (navigator.share) {
+       try {
+         const resp = await fetch(imageUrl);
+         const blob = await resp.blob();
+         const file = new File([blob], 'postly-campaign.png', { type: 'image/png' });
+         if (navigator.canShare && navigator.canShare({ files: [file] })) {
+           await navigator.share({ text, files: [file] });
+         } else {
+           await navigator.share({ text });
+         }
+       } catch (e) {
+         await navigator.share({ text }).catch(()=>{});
+       }
     }
   };
 
