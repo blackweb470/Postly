@@ -248,9 +248,7 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
       setIsAIEditing(false);
     }
   };
-IEditing(false);
-    }
-  };
+
 
   // Manual canvas adjustment (brightness / contrast / saturation sliders)
   const applyManualAdjust = (newAdj) => {
