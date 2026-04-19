@@ -415,35 +415,6 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
     let shareText = text;
     let currentPublicUrl = publicImageUrl;
 
-    // 1. Step 0: Ensure image is uploaded for unfurling/link sharing
-    if (!currentPublicUrl) {
-      showToast("Preparing image for social...");
-      try {
-        // Silent save to get a public URL
-        const canvas = document.createElement('canvas');
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = image; });
-        canvas.width = img.width; canvas.height = img.height;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        const imageBase64 = canvas.toDataURL('image/png');
-
-        const data = await apiCall('/api/campaigns', {
-          method: 'POST',
-          body: JSON.stringify({ imageBase64, metadata: analysis || {}, posts })
-        });
-        currentPublicUrl = data.image_url;
-        setPublicImageUrl(currentPublicUrl);
-      } catch (err) {
-        console.warn("Silent upload failed, proceeding with local sharing only", err);
-      }
-    }
-
-    // Append URL for social card unfurling if we have it
-    if (currentPublicUrl) {
-      shareText = `${text}\n\nView full creative: ${currentPublicUrl}`;
-    }
-
     // 2. Proactive Download & Rich Clipboard Copy (Desktop & Mobile)
     try { 
       downloadImage(); 
@@ -472,7 +443,9 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
     if (platform === 'twitter') {
        intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}`;
     } else if (platform === 'facebook') {
-       intentUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(currentPublicUrl || 'https://postly.ai')}`;
+       // Facebook sharer requires a URL and doesn't support text injection.
+       // Since we have 'Rich Copy' in the clipboard, opening the feed is better for pasting image+text.
+       intentUrl = `https://www.facebook.com`;
     } else if (platform === 'linkedin') {
        intentUrl = `https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(shareText)}`; 
     }
