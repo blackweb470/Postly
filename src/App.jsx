@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react'
-import Postly from './components/Postly'
 import LandingPage from './components/LandingPage'
 import AuthPage from './components/AuthPage'
 import Dashboard from './components/Dashboard'
@@ -41,15 +40,6 @@ function App() {
     setCurrentView('landing')
   }
 
-  const handleNewCampaign = () => {
-    setCampaignKey(prev => prev + 1) // fresh instance each time
-    setCurrentView('campaign')
-  }
-
-  const handleCampaignBack = () => {
-    setCurrentView('dashboard')
-  }
-
   if (checkingSession) {
     return (
       <div className="min-h-screen bg-[#0f172a] flex items-center justify-center">
@@ -78,16 +68,6 @@ function App() {
         <Dashboard
           user={user}
           onLogout={handleLogout}
-          onNewCampaign={handleNewCampaign}
-        />
-      )}
-      {currentView === 'campaign' && (
-        <Postly
-          key={campaignKey}
-          user={user}
-          onLogout={handleLogout}
-          onBack={handleCampaignBack}
-          onCampaignSaved={handleCampaignBack}
         />
       )}
     </div>

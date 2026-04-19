@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard, FolderOpen, Plug, Settings, LogOut, Plus,
-  Sparkles, FileText, Zap, Calendar, Trash2, Eye, X,
+  Sparkles, FileText, Zap, Calendar, Trash2, Eye, X, Send,
   Facebook, Twitter, Instagram, Linkedin, Video,
   ChevronRight, Bell, Search, MoreHorizontal, RefreshCw,
   CheckCircle2, Clock, BarChart2, Globe, ArrowRight, TrendingUp, Activity
 } from 'lucide-react';
 import { apiCall } from '../lib/api';
+import Postly from './Postly';
 
 const PLATFORMS = ['facebook', 'twitter', 'instagram', 'linkedin', 'tiktok'];
 
@@ -36,13 +37,48 @@ function timeAgo(dateStr) {
   return `${days}d ago`;
 }
 
-export default function Dashboard({ user, onLogout, onNewCampaign }) {
+export default function Dashboard({ user, onLogout }) {
   const [activeNav, setActiveNav] = useState('dashboard');
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(null);
   const [viewCampaign, setViewCampaign] = useState(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const sharePost = async (platform, text, imageUrl) => {
+    // 1. Proactively grab the text
+    try { await navigator.clipboard.writeText(text); } catch(e){}
+    
+    // 2. Fetch and download the image locally from Supabase URL
+    if (imageUrl) {
+      try {
+        const resp = await fetch(imageUrl);
+        const blob = await resp.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = `postly-campaign.png`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+      } catch(e) {
+        console.warn('Auto download failed', e);
+      }
+    }
+
+    // 3. Fire Web Intent for Desktop or Web Share for Native
+    let intentUrl = '';
+    if (platform === 'twitter') intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
+    else if (platform === 'facebook') intentUrl = `https://www.facebook.com/sharer/sharer.php`;
+    else if (platform === 'linkedin') intentUrl = `https://www.linkedin.com/feed/?shareActive=true`;
+    
+    if (intentUrl && !window.matchMedia("(any-pointer: coarse)").matches) {
+       window.open(intentUrl, '_blank');
+    } else if (navigator.share) {
+       navigator.share({ text, url: imageUrl }).catch(()=>{});
+    }
+  };
 
   useEffect(() => {
     fetchCampaigns();
@@ -162,7 +198,7 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
                 <h3 className="text-lg font-display font-bold text-slate-900 mb-2">No campaigns yet</h3>
                 <p className="text-slate-500 mb-6 max-w-sm">Tap into AI to automatically transform your raw product shots into engaging multi-channel assets.</p>
                 <button
-                  onClick={onNewCampaign}
+                  onClick={() => setActiveNav('create')}
                   className="bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white px-6 py-3 rounded-xl font-medium transition shadow-lg shadow-black/5"
                 >
                   Start your first campaign
@@ -267,7 +303,7 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
                 <h4 className="font-semibold text-slate-900 truncate mb-1" title={c.metadata?.product_name}>{c.metadata?.product_name || 'Untitled Campaign'}</h4>
                 <p className="text-xs text-slate-500 mb-4">{timeAgo(c.created_at)}</p>
                 <div className="mt-auto flex gap-2">
-                  <button onClick={() => setViewCampaign(c)} className="flex-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-2 rounded-lg text-sm font-semibold transition-colors">Preview</button>
+                  <button onClick={() => setViewCampaign(c)} className="flex-1 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 py-2 rounded-lg text-sm font-semibold transition-colors">View & Share</button>
                   <button onClick={() => deleteCampaign(c.id)} disabled={deleting === c.id} className="p-2 border border-slate-200 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
                     {deleting === c.id ? <div className="w-4 h-4 border-2 border-red-500/30 border-t-red-500 rounded-full animate-spin" /> : <Trash2 className="w-4 h-4" />}
                   </button>
@@ -332,13 +368,13 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
                 </div>
                 <div>
                   <h4 className="font-bold text-slate-900 capitalize text-lg">{platform === 'twitter' ? 'X (Twitter)' : platform}</h4>
-                  <p className="text-sm text-emerald-600 flex items-center font-medium mt-0.5">
-                     <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full mr-2 animate-pulse"></span> Connected & Active
+                  <p className="text-sm text-slate-400 flex items-center font-medium mt-0.5">
+                     Direct OAuth 2.0 API connection
                   </p>
                 </div>
               </div>
-              <button disabled className="px-5 py-2.5 rounded-xl text-sm font-semibold transition bg-slate-200 text-slate-500 cursor-not-allowed">
-                Managed by Org
+              <button disabled className="px-5 py-2.5 rounded-xl text-sm font-bold transition bg-indigo-50 text-indigo-600 border border-indigo-100 cursor-not-allowed shadow-sm">
+                Coming Soon
               </button>
             </div>
           ))}
@@ -399,6 +435,8 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
       case 'analytics': return renderAnalyticsView();
       case 'integrations': return renderIntegrationsView();
       case 'settings': return renderSettingsView();
+      case 'create': 
+        return <Postly user={user} onCampaignSaved={() => { fetchCampaigns(); setActiveNav('campaigns'); }} />;
       default: return renderDashboardHome();
     }
   };
@@ -499,7 +537,7 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
           </div>
           
           <button
-            onClick={onNewCampaign}
+            onClick={() => setActiveNav('create')}
             className="hidden lg:flex items-center bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white px-5 py-2.5 rounded-xl text-sm font-semibold shadow-md transition-all active:scale-95 group"
           >
             <div className="w-5 h-5 bg-white/10 rounded-md flex items-center justify-center mr-2 group-hover:bg-white/20 transition-colors">
@@ -572,9 +610,14 @@ export default function Dashboard({ user, onLogout, onNewCampaign }) {
                           <PlatformIcon platform={p} className="w-3.5 h-3.5" />
                           <span className="capitalize">{p === 'twitter' ? 'X.com' : p}</span>
                         </div>
-                        <button className="text-slate-400 hover:text-indigo-600 transition" title="Copy text" onClick={() => navigator.clipboard.writeText(viewCampaign.posts[p])}>
-                          <FileText className="w-4 h-4" />
-                        </button>
+                        <div className="flex gap-2">
+                          <button className="text-slate-400 hover:text-indigo-600 transition p-1" title="Copy text" onClick={() => navigator.clipboard.writeText(viewCampaign.posts[p])}>
+                            <FileText className="w-4 h-4" />
+                          </button>
+                          <button className="text-slate-400 hover:text-indigo-600 transition p-1" title="Share via Web" onClick={() => sharePost(p, viewCampaign.posts[p], viewCampaign.image_url)}>
+                            <Send className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                       <p className="text-[15px] font-sans text-slate-700 leading-relaxed whitespace-pre-wrap">{viewCampaign.posts[p]}</p>
                     </div>

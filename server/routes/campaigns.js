@@ -51,7 +51,7 @@ router.post('/', authMiddleware, async (req, res) => {
 router.get('/', authMiddleware, async (req, res) => {
   const { data, error } = await supabase
     .from('campaigns')
-    .select('id, image_url, metadata, created_at')
+    .select('id, image_url, metadata, posts, created_at')
     .eq('user_id', req.user.id)
     .order('created_at', { ascending: false })
     .limit(20);

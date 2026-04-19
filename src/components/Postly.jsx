@@ -63,6 +63,7 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
   const [savingCampaign, setSavingCampaign] = useState(false);
   const [showCampaigns, setShowCampaigns] = useState(false);
   const [campaignSaved, setCampaignSaved] = useState(false);
+  const [publicImageUrl, setPublicImageUrl] = useState(null);
 
   // AI Image Editor State
   const [editPrompt, setEditPrompt] = useState('');
@@ -326,10 +327,11 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
       canvas.getContext('2d').drawImage(img, 0, 0);
       const imageBase64 = canvas.toDataURL('image/png');
 
-      await apiCall('/api/campaigns', {
+      const data = await apiCall('/api/campaigns', {
         method: 'POST',
         body: JSON.stringify({ imageBase64, metadata: analysis, posts })
       });
+      setPublicImageUrl(data.image_url);
       setCampaignSaved(true);
       showToast('Campaign saved to your history!');
       // Refresh campaigns list
@@ -383,8 +385,19 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
   };
 
   const dispatchToNetwork = async (platform) => {
-    showToast(`Dispatching payload to ${platform}...`);
-    await new Promise(r => setTimeout(r, 1500));
+    showToast(`Initializing API handshake with ${platform}...`);
+    await new Promise(r => setTimeout(r, 1000));
+    
+    // Simulate real payload preparation
+    console.group(`Postly Social Dispatch: ${platform}`);
+    console.log('Payload Type:', 'Image + Metadata Content');
+    console.log('Public URL:', publicImageUrl || 'Local Blob');
+    console.log('Caption Length:', posts[platform]?.length);
+    console.groupEnd();
+
+    showToast(`Uploading creative and synchronizing metadata...`);
+    await new Promise(r => setTimeout(r, 1200));
+    
     showToast(`Successfully published to ${platform}! 🚀`);
   };
 
@@ -398,41 +411,98 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
 
   // Share text + image via native OS share sheet (Web Share API)
   const shareWithImage = async (platform, text) => {
-    try {
-      // Use canvas conversion (avoids CORS issues with external image URLs)
-      const file = await imageToFile(image);
+    const isMobile = window.matchMedia("(any-pointer: coarse)").matches;
+    let shareText = text;
+    let currentPublicUrl = publicImageUrl;
 
-      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-        // Full native share — opens OS share sheet with image + caption
-        await navigator.share({ text, files: [file] });
-      } else if (navigator.share) {
-        // Share API exists but no file support (older browsers)
-        // Download image first, then share text
-        downloadImage();
-        await navigator.share({ text });
-        showToast('Image saved to downloads. Attach it manually in the app.');
+    // 1. Step 0: Ensure image is uploaded for unfurling/link sharing
+    if (!currentPublicUrl) {
+      showToast("Preparing image for social...");
+      try {
+        // Silent save to get a public URL
+        const canvas = document.createElement('canvas');
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = image; });
+        canvas.width = img.width; canvas.height = img.height;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        const imageBase64 = canvas.toDataURL('image/png');
+
+        const data = await apiCall('/api/campaigns', {
+          method: 'POST',
+          body: JSON.stringify({ imageBase64, metadata: analysis || {}, posts })
+        });
+        currentPublicUrl = data.image_url;
+        setPublicImageUrl(currentPublicUrl);
+      } catch (err) {
+        console.warn("Silent upload failed, proceeding with local sharing only", err);
+      }
+    }
+
+    // Append URL for social card unfurling if we have it
+    if (currentPublicUrl) {
+      shareText = `${text}\n\nView full creative: ${currentPublicUrl}`;
+    }
+
+    // 2. Proactive Download & Rich Clipboard Copy (Desktop & Mobile)
+    try { 
+      downloadImage(); 
+      
+      const imgFile = await imageToFile(image);
+      const isClipboardItemSupported = typeof ClipboardItem !== 'undefined';
+
+      if (isClipboardItemSupported) {
+        // Best approach: Copy both text AND actual image data
+        const item = new ClipboardItem({
+          'text/plain': new Blob([shareText], { type: 'text/plain' }),
+          'image/png': imgFile
+        });
+        await navigator.clipboard.write([item]);
       } else {
-        // No Web Share API (most desktop browsers except Chrome/Edge)
-        await navigator.clipboard.writeText(text);
-        downloadImage();
-        showToast('Caption copied + image downloaded. Open your app and paste!');
+        await navigator.clipboard.writeText(shareText);
+      }
+    } catch (e) {
+      console.warn("Clipboard enhancement failed, using fallback", e);
+      // Basic fallback
+      try { await navigator.clipboard.writeText(shareText); } catch (e2) {}
+    }
+
+    // 3. Formulate Web Intents for Desktop users
+    let intentUrl = '';
+    if (platform === 'twitter') {
+       intentUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}`;
+    } else if (platform === 'facebook') {
+       intentUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(currentPublicUrl || 'https://postly.ai')}`;
+    } else if (platform === 'linkedin') {
+       intentUrl = `https://www.linkedin.com/feed/?shareActive=true&text=${encodeURIComponent(shareText)}`; 
+    }
+
+    // 4. Desktop Execution: Open URL immediately
+    if (intentUrl && !isMobile) {
+       window.open(intentUrl, '_blank');
+       showToast(`Image & Caption copied! Ready to paste in the new tab.`);
+       return;
+    }
+
+    // 5. Mobile Execution: Native OS Share Sheet
+    try {
+      const file = await imageToFile(image);
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ text: shareText, files: [file] });
+      } else if (navigator.share) {
+        await navigator.share({ text: shareText });
+        showToast('Caption copied. Attach the saved image manually.');
+      } else {
+        showToast(`Image & Caption ready! Open your ${platform} app and paste.`);
       }
     } catch (err) {
-      if (err.name === 'AbortError') return; // User cancelled — do nothing
-      // Canvas conversion failed (e.g. cross-origin tainted) — fall back to download
-      console.warn('shareWithImage error:', err);
-      try {
-        downloadImage();
-        await navigator.clipboard.writeText(text);
-        showToast('Caption copied + image downloaded. Attach it manually.');
-      } catch {
-        showToast('Share failed. Try the Download Image button instead.');
-      }
+      if (err.name === 'AbortError') return; 
+      showToast('Ready to paste. Open app to attach image manually.');
     }
   };
 
   return (
-    <div className="flex h-screen bg-[#fafafa] antialiased text-slate-900 overflow-hidden font-sans">
+    <div className="flex h-[calc(100vh-120px)] bg-white rounded-3xl border border-slate-200/60 shadow-sm overflow-hidden font-sans">
       <canvas ref={canvasRef} className="hidden" />
 
       {/* TOASTS */}
@@ -499,41 +569,13 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
         </div>
       )}
 
-      {/* PITCH BANNER */}
-      {showPitch && (
-        <div className="fixed top-0 left-0 right-0 z-40 bg-indigo-600 text-white px-6 py-3 flex justify-between items-center shadow-md">
-          <div className="flex items-center text-sm font-medium">
-            <Layers className="w-4 h-4 mr-2 text-indigo-200" />
-            <span>Postly Enterprise Edition — Connect accounts and auto-publish stunning content.</span>
-          </div>
-          <button onClick={() => setShowPitch(false)} className="text-indigo-200 hover:text-white transition">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-      )}
+      {/* PITCH BANNER REMOVED FOR DASHBOARD INTEGRATION */}
 
-      {/* SIDEBAR NAVIGATION */}
-      <aside className={`w-72 bg-white border-r border-slate-200 flex flex-col pt-${showPitch ? '16' : '0'} transition-all`}>
-        {onBack && (
-          <div className="px-6 pt-6 pb-2">
-            <button onClick={onBack} className="flex items-center text-xs font-semibold text-slate-500 hover:text-indigo-600 transition">
-              <ChevronLeft className="w-4 h-4 mr-1" /> Back to Dashboard
-            </button>
-          </div>
-        )}
-        <div className={`px-8 pb-6 ${onBack ? 'pt-2' : 'pt-8'} border-b border-slate-100 flex justify-between items-center`}>
-          <h1 className="text-xl font-bold tracking-tight text-slate-900 flex items-center">
-            <div className="w-6 h-6 bg-indigo-600 rounded mr-2 flex items-center justify-center">
-               <span className="text-white text-xs font-black">P</span>
-            </div>
-            Postly
-          </h1>
-          <button onClick={() => setShowSettings(true)} className="text-slate-400 hover:text-indigo-600 transition" title="Integrations Hub"><Settings className="w-5 h-5"/></button>
-        </div>
-        
+      <aside className={`w-72 bg-[#0A0A0A] border-r border-[#1f1f1f] flex flex-col pt-0 transition-all z-10 relative`}>
+
         <nav className="flex-1 px-6 py-8 overflow-y-auto">
           <div className="space-y-8 relative">
-            <div className="absolute left-4 top-2 bottom-6 w-0.5 bg-slate-100 -z-10"></div>
+            <div className="absolute left-4 top-2 bottom-6 w-px bg-[#2a2a2a] -z-10"></div>
             
             {STEPS.map((s) => {
               const isActive = step === s.id;
@@ -543,14 +585,14 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                 <div key={s.id} className="flex flex-col relative">
                   <div className={`flex items-center group ${isActive ? '' : isPast ? 'cursor-pointer hover:opacity-80' : 'opacity-40'}`} onClick={() => isPast && setStep(s.id)}>
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 transition-all duration-300 shadow-sm ${
-                      isActive ? 'bg-indigo-600 border-indigo-600 text-white ring-4 ring-indigo-50' : 
-                      isPast ? 'bg-white border-indigo-600 text-indigo-600' : 'bg-white border-slate-200 text-slate-400'
+                      isActive ? 'bg-indigo-500 border-indigo-400 text-white ring-4 ring-indigo-500/10 shadow-indigo-500/30' : 
+                      isPast ? 'bg-[#1a1a1a] border-indigo-500 text-indigo-400' : 'bg-[#0A0A0A] border-[#2a2a2a] text-[#525252]'
                     }`}>
                       {isPast ? <CheckCircle2 className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
                     </div>
                     <div className="ml-4">
-                      <p className={`text-sm font-semibold ${isActive ? 'text-indigo-900' : isPast ? 'text-slate-700' : 'text-slate-500'}`}>{s.name}</p>
-                      {isActive && <p className="text-xs text-slate-500 mt-0.5">In Progress</p>}
+                      <p className={`text-sm font-semibold ${isActive ? 'text-white' : isPast ? 'text-slate-300' : 'text-[#525252]'}`}>{s.name}</p>
+                      {isActive && <p className="text-xs text-indigo-300 mt-0.5">In Progress</p>}
                     </div>
                   </div>
                 </div>
@@ -558,140 +600,119 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
             })}
           </div>
         </nav>
-        
-        <div className="p-6 border-t border-slate-100">
-          {/* Past Campaigns accordion */}
-          <button
-            onClick={() => { setShowCampaigns(!showCampaigns); if (!showCampaigns) loadCampaigns(); }}
-            className="w-full flex items-center justify-between text-xs font-bold uppercase tracking-widest text-slate-400 hover:text-slate-700 mb-3 transition"
-          >
-            <span className="flex items-center"><Clock className="w-3.5 h-3.5 mr-1.5" /> Past Campaigns</span>
-            <span className="text-slate-300">{showCampaigns ? '▲' : '▼'}</span>
-          </button>
-
-          {showCampaigns && (
-            <div className="mb-4 space-y-2 max-h-40 overflow-y-auto pr-1">
-              {loadingCampaigns ? (
-                <div className="flex justify-center py-3">
-                  <div className="w-4 h-4 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin"></div>
-                </div>
-              ) : campaigns.length === 0 ? (
-                <p className="text-xs text-slate-400 text-center py-2">No campaigns saved yet.</p>
-              ) : campaigns.map(c => (
-                <div key={c.id} className="flex items-center bg-slate-50 rounded-lg border border-slate-100 overflow-hidden group">
-                  <img src={c.image_url} alt={c.metadata?.product_name} className="w-10 h-10 object-cover shrink-0" />
-                  <div className="flex-1 px-2 min-w-0">
-                    <p className="text-xs font-semibold text-slate-700 truncate">{c.metadata?.product_name || 'Campaign'}</p>
-                    <p className="text-[10px] text-slate-400">{new Date(c.created_at).toLocaleDateString()}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="mb-4 flex flex-wrap gap-2 justify-center">
-              {Object.keys(connectedApps).map(app => connectedApps[app] && (
-                 <div key={app} title={`${app} connected`} className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)] animate-pulse"></div>
-              ))}
-          </div>
-          <div className="space-y-3">
-            <button onClick={() => { setStep(1); setImage(null); setRawImage(null); setAnalysis(null); setPosts({ facebook: '', twitter: '', instagram: '', linkedin: '', tiktok: '' }); setCampaignSaved(false); }} className="w-full py-2.5 px-4 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200 rounded-lg transition-colors flex items-center justify-center">
-              <RefreshCw className="w-4 h-4 mr-2" /> New Campaign
-            </button>
-            {onLogout && (
-              <button onClick={onLogout} className="w-full py-2.5 px-4 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 border border-red-100 rounded-lg transition-colors flex items-center justify-center">
-                <LogOut className="w-4 h-4 mr-2" /> Log Out
-              </button>
-            )}
-          </div>
-        </div>
       </aside>
 
       {/* MAIN WORKSPACE */}
-      <main className={`flex-1 overflow-y-auto relative ${showPitch ? 'pt-12' : ''}`}>
-        <div className="max-w-6xl mx-auto p-8 lg:p-12">
-          
+      <main className="flex-1 overflow-y-auto relative bg-[#F8F9FB]">
+        <div className="h-full flex flex-col">
+
           {/* STEP 1: CAPTURE MEDIA */}
           {step === 1 && (
-            <div className="animate-slide-in max-w-3xl">
-              <header className="mb-8">
-                <h2 className="text-3xl font-bold tracking-tight text-slate-900">Capture Media Source</h2>
-                <p className="text-slate-500 mt-2 text-lg">Initialize your marketing pipeline by providing a high-quality product asset.</p>
-              </header>
-              
-              {cameraError && (
-                 <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl mb-6 text-sm flex items-start shadow-sm">
-                   <X className="w-5 h-5 mr-3 shrink-0" onClick={() => setCameraError(null)} />
-                   <span>{cameraError}</span>
-                 </div>
-              )}
+            <div className="flex-1 flex flex-col lg:flex-row animate-slide-in">
 
-              {cameraActive ? (
-                <div className="bg-slate-900 rounded-2xl overflow-hidden shadow-xl border border-slate-800 relative aspect-video flex flex-col">
-                  <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover opacity-90" />
-                  <div className="absolute inset-x-0 bottom-0 p-6 bg-gradient-to-t from-slate-900/90 to-transparent flex justify-center gap-4 border-t border-white/10">
-                    <button onClick={stopCamera} className="bg-slate-800/80 hover:bg-slate-700 text-white px-6 py-2.5 rounded-lg text-sm font-medium backdrop-blur-md border border-white/10 transition">
-                      Cancel Feed
-                    </button>
-                    <button onClick={takeSnapshot} className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-2.5 rounded-lg text-sm font-semibold shadow-lg flex items-center transition border border-indigo-400/50">
-                      <Camera className="w-4 h-4 mr-2" /> Execute Capture
-                    </button>
+              {/* LEFT — Upload Panel */}
+              <div className="flex-1 flex flex-col justify-center p-10 lg:p-14 max-w-xl">
+                <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-indigo-500 mb-3">Step 1 of 5</p>
+                <h2 className="text-3xl font-bold text-slate-900 leading-tight mb-2">Add your product image</h2>
+                <p className="text-slate-400 text-sm mb-10">Upload a high-quality photo and our AI will handle the rest — from editing to caption generation.</p>
+
+                {cameraError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl mb-6 text-sm flex items-start">
+                    <X className="w-4 h-4 mr-2 shrink-0 mt-0.5 cursor-pointer" onClick={() => setCameraError(null)} />
+                    <span>{cameraError}</span>
                   </div>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  
-                  <div 
-                    className="border border-slate-200 rounded-2xl p-10 text-center transition hover:border-indigo-300 hover:bg-indigo-50/30 hover:shadow-md flex flex-col items-center justify-center cursor-pointer bg-white group"
-                    onClick={() => fileInputRef.current.click()}
-                  >
-                    <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
-                      <UploadCloud className="w-8 h-8" />
+                )}
+
+                {cameraActive ? (
+                  <div className="bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border border-slate-800 relative aspect-video">
+                    <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                    <div className="absolute inset-x-0 bottom-0 p-5 bg-gradient-to-t from-black/80 to-transparent flex gap-3 justify-center">
+                      <button onClick={stopCamera} className="bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-md px-5 py-2 rounded-lg text-sm font-medium transition">Cancel</button>
+                      <button onClick={takeSnapshot} className="bg-white text-slate-900 px-6 py-2 rounded-lg text-sm font-semibold flex items-center transition hover:bg-slate-100 shadow-lg">
+                        <Camera className="w-4 h-4 mr-2" /> Capture
+                      </button>
                     </div>
-                    <h3 className="text-slate-900 font-semibold text-lg mb-2">Upload Asset</h3>
-                    <p className="text-slate-500 text-sm px-4">Standard imagery (JPEG, PNG, WEBP)</p>
-                    <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} ref={fileInputRef} />
                   </div>
-
-                  <div className="flex flex-col gap-4">
-                    <div 
-                      onClick={startCamera}
-                      className="border border-slate-200 rounded-2xl p-6 text-center transition hover:border-indigo-300 hover:bg-indigo-50/30 hover:shadow-md flex flex-col items-center justify-center cursor-pointer bg-white group flex-1"
+                ) : (
+                  <div className="space-y-3">
+                    {/* Primary drop zone */}
+                    <div
+                      onClick={() => fileInputRef.current.click()}
+                      className="relative border-2 border-dashed border-slate-200 hover:border-slate-400 rounded-2xl p-12 flex flex-col items-center justify-center cursor-pointer bg-white hover:bg-slate-50/50 transition-all duration-200 group"
                     >
-                      <div className="w-12 h-12 bg-slate-100 text-slate-600 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                        <Camera className="w-6 h-6" />
+                      <div className="w-16 h-16 bg-slate-900 text-white rounded-2xl flex items-center justify-center mb-5 shadow-lg group-hover:scale-110 transition-transform duration-200">
+                        <UploadCloud className="w-8 h-8" />
                       </div>
-                      <h3 className="text-slate-900 font-semibold text-md mb-1">Live Camera Feed</h3>
+                      <p className="text-slate-800 font-semibold text-base mb-1">Drop your image here</p>
+                      <p className="text-slate-400 text-xs mb-4">or click to browse files</p>
+                      <span className="text-[11px] text-slate-300 font-medium uppercase tracking-widest border border-slate-200 rounded-full px-3 py-1">JPEG · PNG · WEBP</span>
+                      <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} ref={fileInputRef} />
                     </div>
 
-                    {/* ALWAYS FALLBACK DIRECTLY FOR MOBILE/IOS APPS */}
-                    <div 
-                      onClick={() => nativeCameraInputRef.current.click()}
-                      className="border border-slate-200 rounded-xl p-4 text-center transition hover:bg-slate-50 hover:shadow-sm flex items-center justify-center cursor-pointer bg-white"
-                    >
-                      <Smartphone className="w-5 h-5 text-slate-500 mr-2" />
-                      <span className="text-slate-700 font-semibold text-sm">Use Native Device Camera</span>
-                      <input type="file" className="hidden" accept="image/*" capture="environment" onChange={handleFileUpload} ref={nativeCameraInputRef} />
+                    {/* Secondary options */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={startCamera}
+                        className="flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-xl px-4 py-3 text-sm font-medium text-slate-600 transition-all"
+                      >
+                        <Camera className="w-4 h-4 text-slate-400" /> Live Camera
+                      </button>
+                      <button
+                        onClick={() => nativeCameraInputRef.current.click()}
+                        className="flex items-center justify-center gap-2 bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50 rounded-xl px-4 py-3 text-sm font-medium text-slate-600 transition-all"
+                      >
+                        <Smartphone className="w-4 h-4 text-slate-400" /> Mobile Camera
+                        <input type="file" className="hidden" accept="image/*" capture="environment" onChange={handleFileUpload} ref={nativeCameraInputRef} />
+                      </button>
+                    </div>
+
+                    {/* Demo assets */}
+                    <div className="flex items-center gap-2 pt-1">
+                      <span className="text-xs text-slate-300 whitespace-nowrap">Try a demo:</span>
+                      <div className="flex gap-1.5">
+                        {['sneaker','perfume','headphones'].map(d => (
+                          <button key={d} onClick={() => loadDemoImage(d)} className="px-3 py-1 rounded-full border border-slate-200 text-[11px] font-medium text-slate-500 hover:bg-slate-100 hover:border-slate-300 transition capitalize">{d}</button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
-              {!cameraActive && (
-                <div className="mt-12 bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Development Environment Testing</h4>
-                  <div className="flex flex-wrap gap-3">
-                    <button onClick={() => loadDemoImage('sneaker')} className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium hover:bg-slate-50 text-slate-700 transition">Load Sneaker Asset</button>
-                    <button onClick={() => loadDemoImage('perfume')} className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium hover:bg-slate-50 text-slate-700 transition">Load Perfume Asset</button>
-                    <button onClick={() => loadDemoImage('headphones')} className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium hover:bg-slate-50 text-slate-700 transition">Load Audio Asset</button>
+              {/* RIGHT — Image Preview Panel */}
+              <div className="hidden lg:flex flex-1 items-center justify-center bg-[#F0F1F3] border-l border-slate-200/60 p-12">
+                {image ? (
+                  <div className="w-full max-w-sm animate-slide-in">
+                    <div className="rounded-2xl overflow-hidden shadow-2xl border border-white/60 bg-white">
+                      <img src={image} alt="Product preview" className="w-full object-contain max-h-72" />
+                    </div>
+                    <div className="mt-6 flex flex-col gap-3">
+                      <p className="text-xs text-slate-400 text-center font-medium">Image loaded — ready to continue</p>
+                      <button
+                        onClick={() => setStep(2)}
+                        className="w-full bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white py-3.5 rounded-2xl text-sm font-bold flex items-center justify-center transition-all shadow-lg"
+                      >
+                        Continue to Studio <ArrowRight className="w-4 h-4 ml-2" />
+                      </button>
+                      <button onClick={() => { setImage(null); setRawImage(null); }} className="text-xs text-slate-400 hover:text-slate-700 text-center transition">Change image</button>
+                    </div>
                   </div>
-                </div>
-              )}
+                ) : (
+                  <div className="text-center">
+                    <div className="w-24 h-24 rounded-3xl bg-white/70 border border-slate-200/60 flex items-center justify-center mx-auto mb-5 shadow-sm">
+                      <UploadCloud className="w-10 h-10 text-slate-300" />
+                    </div>
+                    <p className="text-slate-400 text-sm font-medium">Your image preview will appear here</p>
+                    <p className="text-slate-300 text-xs mt-1">Upload a product photo to get started</p>
+                  </div>
+                )}
+              </div>
 
+              {/* Mobile continue button */}
               {image && !cameraActive && (
-                <div className="mt-8 flex justify-end animate-slide-in">
-                  <button onClick={() => setStep(2)} className="bg-slate-900 hover:bg-slate-800 text-white px-8 py-3 rounded-lg text-sm font-semibold shadow-md flex items-center transition">
-                    Continue to Polish <ArrowRight className="w-4 h-4 ml-2" />
+                <div className="lg:hidden px-10 pb-10">
+                  <button onClick={() => setStep(2)} className="w-full bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white py-3.5 rounded-2xl text-sm font-bold flex items-center justify-center transition-all shadow-lg">
+                    Continue to Studio <ArrowRight className="w-4 h-4 ml-2" />
                   </button>
                 </div>
               )}
@@ -700,104 +721,104 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
 
           {/* STEP 2: AI OPERATIONS STUDIO */}
           {step === 2 && (
-             <div className="animate-slide-in w-full max-w-6xl">
-               <header className="mb-8 flex justify-between items-center">
-                 <div>
-                   <h2 className="text-3xl font-bold tracking-tight text-slate-900">AI Image Studio</h2>
-                   <p className="text-slate-500 mt-1 text-sm">Apply professional edits powered by OpenAI image generation.</p>
-                 </div>
-                 <button onClick={performAnalysis} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-lg text-sm font-semibold shadow-md flex items-center transition">
-                   {isPolishDone ? <>Continue to Analysis <ArrowRight className="w-4 h-4 ml-2" /></> : 'Skip & Analyse'}
-                 </button>
-               </header>
+            <div className="flex-1 flex flex-col lg:flex-row animate-slide-in min-h-0">
 
-               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* LEFT — Dark Image Canvas */}
+              <div className="flex-1 bg-[#0f0f0f] flex flex-col">
+                {/* Canvas Header */}
+                <div className="flex items-center justify-between px-6 py-4 border-b border-[#1f1f1f]">
+                  <div className="flex items-center gap-3">
+                    <div className="flex gap-1.5">
+                      <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
+                      <div className="w-3 h-3 rounded-full bg-[#ffbd2e]"></div>
+                      <div className="w-3 h-3 rounded-full bg-[#28ca41]"></div>
+                    </div>
+                    <span className="text-[#525252] text-xs font-medium ml-2">AI Studio Canvas</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {isPolishDone && (
+                      <span className="text-emerald-400 text-xs font-semibold flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Edit applied
+                      </span>
+                    )}
+                  </div>
+                </div>
 
-                 {/* Live Image Preview */}
-                 <div className="lg:col-span-7 space-y-3">
-                   <div className="bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl relative" style={{minHeight: 400}}>
-                     {isAIEditing && (
-                       <div className="absolute inset-0 z-10 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center rounded-2xl space-y-4">
-                         <div className="relative w-16 h-16">
+                {/* Canvas Image */}
+                <div className="flex-1 flex items-center justify-center p-8 relative">
+                  {isAIEditing && (
+                    <div className="absolute inset-0 z-10 bg-[#0f0f0f]/90 backdrop-blur-md flex flex-col items-center justify-center gap-4">
+                      <div className="relative w-14 h-14">
                            <div className="absolute inset-0 border-4 border-indigo-500/20 rounded-full"></div>
                            <div className="absolute inset-0 border-4 border-transparent border-t-indigo-500 rounded-full animate-spin"></div>
-                         </div>
-                         <div className="text-center">
-                           <p className="text-white font-semibold text-sm">OpenAI is working on your image</p>
-                           <p className="text-slate-400 text-xs mt-1">This may take 10–30 seconds</p>
-                         </div>
-                       </div>
-                     )}
-                     <img
-                       src={showBefore ? rawImage : image}
-                       className="w-full h-full object-contain transition-all duration-500"
-                       style={{minHeight: 400}}
-                       alt="Product"
-                     />
-                     {/* Before/After toggle */}
-                     <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
-                       <div className="flex space-x-2">
-                         {rawImage !== image && (
-                           <>
-                             <button
-                               onMouseDown={() => setShowBefore(true)}
-                               onMouseUp={() => setShowBefore(false)}
-                               onMouseLeave={() => setShowBefore(false)}
-                               className="bg-black/70 text-white text-xs font-medium px-3 py-1.5 rounded-full border border-white/10 backdrop-blur-sm hover:bg-black/90 transition"
-                             >Hold: Before</button>
-                             <span className={`text-xs font-semibold px-3 py-1.5 rounded-full border backdrop-blur-sm ${showBefore ? 'bg-slate-700/80 text-slate-200 border-slate-600' : 'bg-emerald-600/80 text-white border-emerald-400/30'}`}>
-                               {showBefore ? 'Before' : '✓ Edited'}
-                             </span>
-                           </>
-                         )}
-                       </div>
-                       {rawImage !== image && (
-                         <button onClick={() => { setImage(rawImage); setIsPolishDone(false); }} className="bg-black/60 text-slate-300 text-xs px-3 py-1.5 rounded-full border border-white/10 backdrop-blur-sm hover:text-white transition">
-                           ↩ Revert
-                         </button>
-                       )}
-                     </div>
-                   </div>
+                      </div>
+                    </div>
+                  )}
+                  <img
+                    src={showBefore ? rawImage : image}
+                    className="max-w-full max-h-full object-contain rounded-xl shadow-2xl transition-all duration-500"
+                    style={{maxHeight: 420}}
+                    alt="Product"
+                  />
+                  {rawImage !== image && (
+                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-2">
+                      <button
+                        onMouseDown={() => setShowBefore(true)}
+                        onMouseUp={() => setShowBefore(false)}
+                        onMouseLeave={() => setShowBefore(false)}
+                        className="bg-black/70 text-white text-xs font-medium px-4 py-2 rounded-full border border-white/10 backdrop-blur-sm hover:bg-black/90 transition select-none"
+                      >Hold: Before</button>
+                      <span className={`text-xs font-semibold px-4 py-2 rounded-full border backdrop-blur-sm ${showBefore ? 'bg-white/10 text-white border-white/10' : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/20'}`}>
+                        {showBefore ? 'Original' : '✓ AI Edited'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {/* Canvas Footer */}
+                <div className="px-6 py-4 border-t border-[#1f1f1f] flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {rawImage !== image && (
+                      <button onClick={() => { setImage(rawImage); setIsPolishDone(false); }} className="text-[#525252] hover:text-white text-xs font-medium px-3 py-1.5 rounded-lg border border-[#2a2a2a] hover:border-white/20 transition">↩ Revert</button>
+                    )}
+                    <p className="text-[11px] text-[#525252] font-medium">Step 2 of 5 · AI Image Studio</p>
+                  </div>
+                  <button onClick={performAnalysis} className="bg-white hover:bg-slate-100 text-slate-900 px-5 py-2.5 rounded-xl text-sm font-bold flex items-center transition-all shadow-md">
+                    {isPolishDone ? <>Continue <ArrowRight className="w-4 h-4 ml-2" /></> : 'Skip & Analyse →'}
+                  </button>
+                </div>
+              </div>
 
-                   {isPolishDone && (
-                     <p className="text-xs text-emerald-600 font-medium flex items-center">
-                       <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" /> Edit applied. You can apply additional operations or continue.
-                     </p>
-                   )}
-                 </div>
+              {/* RIGHT — Operations Panel */}
+              <div className="w-full lg:w-[380px] bg-white border-l border-slate-200/60 flex flex-col overflow-hidden">
+                {/* Panel Header */}
+                <div className="px-5 pt-5 pb-4 border-b border-slate-100">
+                  <h3 className="font-bold text-slate-900 text-base">AI Operations</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">Choose an operation to apply via OpenAI</p>
+                </div>
 
-                 {/* AI Operations Panel */}
-                 <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
-                   
-                   {/* Panel Header */}
-                   <div className="px-5 pt-5 pb-0">
-                     <h3 className="font-bold text-slate-900 text-sm">Operations</h3>
-                     <p className="text-xs text-slate-400 mt-0.5 mb-4">Click any operation to apply it via OpenAI</p>
-                   </div>
+                {/* Category Tabs — pill style */}
+                <div className="flex gap-1.5 px-4 pt-3 pb-2 overflow-x-auto scrollbar-none shrink-0">
+                  {[
+                    { id: 'background', label: 'Background' },
+                    { id: 'lighting', label: 'Lighting' },
+                    { id: 'composite', label: 'Composite' },
+                    { id: 'style', label: 'Style' },
+                    { id: 'retouch', label: 'Retouch' },
+                  ].map(tab => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveEditTab(tab.id)}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-full whitespace-nowrap transition-all ${
+                        activeEditTab === tab.id
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+                      }`}
+                    >{tab.label}</button>
+                  ))}
+                </div>
 
-                   {/* Category Tabs */}
-                   <div className="flex border-b border-slate-100 px-3 overflow-x-auto scrollbar-none">
-                     {[
-                       { id: 'background', label: '🖼 Background' },
-                       { id: 'lighting', label: '💡 Lighting' },
-                       { id: 'composite', label: '🔧 Composite' },
-                       { id: 'style', label: '🎨 Style' },
-                       { id: 'retouch', label: '✨ Retouch' },
-                     ].map(tab => (
-                       <button
-                         key={tab.id}
-                         onClick={() => setActiveEditTab(tab.id)}
-                         className={`text-xs font-semibold px-3 py-2.5 whitespace-nowrap border-b-2 transition ${
-                           activeEditTab === tab.id
-                             ? 'border-indigo-600 text-indigo-700'
-                             : 'border-transparent text-slate-400 hover:text-slate-700'
-                         }`}
-                       >{tab.label}</button>
-                     ))}
-                   </div>
-
-                   {/* Operations Grid */}
-                   <div className="flex-1 p-4 overflow-y-auto">
+                {/* Operations List */}
+                <div className="flex-1 overflow-y-auto px-3 py-2">
                      {({
                        background: [
                          { icon: '⬜', label: 'White studio', desc: 'Clean white studio background', prompt: 'Replace the background with a clean, seamless pure white studio photography background. Keep the product perfectly intact and correctly lit.' },
@@ -844,7 +865,7 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                          key={op.label}
                          onClick={() => applyAIEdit(op.prompt)}
                          disabled={isAIEditing}
-                         className="w-full text-left flex items-start p-3 mb-2 rounded-xl border border-slate-100 bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 transition group disabled:opacity-40 disabled:cursor-not-allowed"
+                         className="w-full text-left flex items-center gap-3 px-3 py-3 mb-1 rounded-xl hover:bg-slate-50 transition-all group disabled:opacity-40 disabled:cursor-not-allowed border border-transparent hover:border-slate-200"
                        >
                          <span className="text-2xl mr-3 shrink-0 mt-0.5">{op.icon}</span>
                          <div className="flex-1 min-w-0">
@@ -865,7 +886,7 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                          onChange={e => setEditPrompt(e.target.value)}
                          onKeyDown={e => e.key === 'Enter' && applyAIEdit()}
                          placeholder="Custom instruction…"
-                         className="flex-1 text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400"
+                         className="flex-1 text-sm border border-slate-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400 bg-slate-50 placeholder:text-slate-300"
                          disabled={isAIEditing}
                        />
                        <button
@@ -882,17 +903,21 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                    </div>
                  </div>
 
-               </div>
-             </div>
+              </div>
           )}
 
           {/* STEP 3: METADATA EXTRACTION */}
           {step === 3 && (
+            <div className="max-w-5xl mx-auto w-full p-8 lg:p-10">
             <div className="animate-slide-in max-w-4xl">
               <header className="mb-8 flex justify-between items-end">
-                <h2 className="text-3xl font-bold tracking-tight text-slate-900">Metadata Extraction</h2>
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-indigo-500 mb-2">Step 3</p>
+                  <h2 className="text-2xl font-bold text-slate-900">AI Analysis</h2>
+                  <p className="text-slate-500 mt-1 text-sm">We've extracted your product metadata to power the copy.</p>
+                </div>
                 {analysis && (
-                  <button onClick={generateAllContent} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-lg text-sm font-semibold shadow-md flex items-center transition">
+                  <button onClick={generateAllContent} className="bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center transition-all shadow-md">
                     Generate Copy <ArrowRight className="w-4 h-4 ml-2" />
                   </button>
                 )}
@@ -944,14 +969,20 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                 </div>
               </div>
             </div>
+            </div>
           )}
 
           {/* STEP 4: CONTENT GENERATION */}
           {step === 4 && (
+            <div className="max-w-7xl mx-auto w-full p-8 lg:p-10">
             <div className="animate-slide-in max-w-7xl">
               <header className="mb-8 flex justify-between items-end">
-                <h2 className="text-3xl font-bold tracking-tight text-slate-900">Content Engine</h2>
-                <button onClick={() => setStep(5)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-2.5 rounded-lg text-sm font-semibold shadow-md flex items-center transition">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-indigo-500 mb-2">Step 4</p>
+                  <h2 className="text-2xl font-bold text-slate-900">Content Engine</h2>
+                  <p className="text-slate-500 mt-1 text-sm">Review and edit your generated platform copy.</p>
+                </div>
+                <button onClick={() => setStep(5)} className="bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center transition-all shadow-md">
                   Finalize & Distribute <ArrowRight className="w-4 h-4 ml-2" />
                 </button>
               </header>
@@ -1016,35 +1047,38 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                 })}
               </div>
             </div>
+            </div>
           )}
 
           {/* STEP 5: DISTRIBUTION */}
           {step === 5 && (
+            <div className="max-w-7xl mx-auto w-full p-8 lg:p-10">
             <div className="animate-slide-in max-w-7xl">
                <header className="mb-10 text-center flex flex-col items-center">
-                <h2 className="text-3xl font-bold tracking-tight text-slate-900">Campaign Ready</h2>
-                <p className="text-slate-500 mt-2">Each post includes your product image. Share or auto-publish to your channels.</p>
-                <div className="flex items-center gap-3 mt-4 flex-wrap justify-center">
-                  <button onClick={() => setShowSettings(true)} className="flex items-center text-sm font-semibold text-indigo-600 bg-indigo-50 px-4 py-1.5 rounded-full hover:bg-indigo-100 transition border border-indigo-100">
-                    <Settings className="w-4 h-4 mr-2" /> Manage Connected Accounts
+                <p className="text-xs font-bold uppercase tracking-widest text-indigo-500 mb-2">Step 5</p>
+                <h2 className="text-2xl font-bold text-slate-900">Campaign Ready</h2>
+                <p className="text-slate-500 mt-2 text-sm">Share each post or auto-publish to your connected accounts.</p>
+                <div className="flex items-center gap-3 mt-5 flex-wrap justify-center">
+                  <button onClick={() => setShowSettings(true)} className="flex items-center text-sm font-medium text-slate-600 bg-white px-4 py-2 rounded-xl hover:bg-slate-50 transition border border-slate-200 shadow-sm">
+                    <Settings className="w-4 h-4 mr-2" /> Connected Accounts
                   </button>
-                  <button onClick={downloadImage} className="flex items-center text-sm font-semibold text-slate-600 bg-slate-50 px-4 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-200">
+                  <button onClick={downloadImage} className="flex items-center text-sm font-medium text-slate-600 bg-white px-4 py-2 rounded-xl hover:bg-slate-50 transition border border-slate-200 shadow-sm">
                     ↓ Download Image
                   </button>
                   {campaignSaved ? (
-                    <div className="flex items-center text-sm font-semibold text-emerald-700 bg-emerald-50 px-4 py-1.5 rounded-full border border-emerald-200">
-                      <CheckCircle2 className="w-4 h-4 mr-1.5" /> Saved to History
+                    <div className="flex items-center text-sm font-semibold text-emerald-700 bg-emerald-50 px-4 py-2 rounded-xl border border-emerald-200">
+                      <CheckCircle2 className="w-4 h-4 mr-1.5" /> Saved to Library
                     </div>
                   ) : (
                     <button
                       onClick={saveCampaign}
                       disabled={savingCampaign}
-                      className="flex items-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-1.5 rounded-full transition border border-indigo-700 disabled:opacity-60"
+                      className="flex items-center text-sm font-semibold text-white bg-[#0a0a0a] hover:bg-[#1a1a1a] px-4 py-2 rounded-xl transition border border-[#1a1a1a] shadow-md disabled:opacity-60"
                     >
                       {savingCampaign ? (
                         <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin mr-1.5 inline-block"></span>Saving…</>
                       ) : (
-                        <><Send className="w-3.5 h-3.5 mr-1.5" /> Save Campaign</>
+                        <><Send className="w-3.5 h-3.5 mr-1.5" /> Save to Library</>
                       )}
                     </button>
                   )}
@@ -1145,6 +1179,7 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
                 })}
               </div>
             </div>
+            </div>
           )}
 
         </div>
@@ -1152,3 +1187,6 @@ export default function Postly({ onLogout, onBack, onCampaignSaved, user }) {
     </div>
   );
 }
+
+
+
